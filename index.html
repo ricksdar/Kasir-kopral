@@ -838,6 +838,9 @@ function viewLogin(){
         <button class="user-btn" onclick="selectLoginUser(${u.id})">
           <span class="avatar">${u.name.charAt(0).toUpperCase()}</span> ${escapeHtml(u.name)}
         </button>`).join('')}
+      <div class="muted" style="text-align:center; margin-top:22px; font-size:12px;">
+        Akun pertama kali: <strong>Admin</strong> · PIN <strong>0000</strong><br>PIN bisa diganti di menu Kasir Toko.
+      </div>
     </div>
     ${state.modal ? modalView() : ''}
   `;
@@ -1443,15 +1446,15 @@ function buildLogoRasterBlock(){
 // konsisten di printer manapun); cuma logo yang tetap gambar (raster kecil,
 // siluet bersih jadi aman) karena teks polos gak bisa nampilin gambar.
 // Ini yang dipakai printViaBluetooth() & printViaUSB().
-function buildEscPosReceiptBytes(sale){
+function buildEscPosLogoBlock(){
+  return concatBytes([ESC_POS_INIT, ESC_ALIGN_CENTER, buildLogoRasterBlock()]);
+}
+function buildEscPosTextBlock(sale){
   const encoder = new TextEncoder();
   const lines = receiptText(sale).split('\n');
   const headerLine = lines[0]; // "KOPRAL KERODONG"
   const bodyText = lines.slice(1).join('\n') + '\n\n\n';
   return concatBytes([
-    ESC_POS_INIT,
-    ESC_ALIGN_CENTER,
-    buildLogoRasterBlock(),
     encoder.encode('\n'),
     ESC_BOLD_ON,
     encoder.encode(headerLine + '\n'),
@@ -1459,6 +1462,9 @@ function buildEscPosReceiptBytes(sale){
     encoder.encode(bodyText),
     ESC_POS_CUT,
   ]);
+}
+function buildEscPosReceiptBytes(sale){
+  return concatBytes([buildEscPosLogoBlock(), buildEscPosTextBlock(sale)]);
 }
 // Ubah canvas struk (yang sama persis dipakai buat gambar PNG, termasuk logo)
 // jadi raster hitam-putih 1-bit, supaya printer thermal mencetak APA ADANYA
@@ -1539,10 +1545,14 @@ async function printViaBluetooth(){
     const service = await server.getPrimaryService(BT_PRINTER_SERVICE);
     const characteristic = await service.getCharacteristic(BT_PRINTER_CHAR);
     showAlert('Menyiapkan struk...');
-    const data = buildEscPosReceiptBytes(state.lastSale);
-    // Potongan kecil + jeda supaya buffer printer BLE murah tidak kebanjiran
-    // (penyebab paling umum hasil cetak putus-putus/acak).
-    await writeInChunks(characteristic, data, 100, 15);
+    // Logo (gambar/raster) jauh lebih berat buat print head dibanding teks
+    // biasa -- dikirim pelan-pelan per 1 baris raster (48 byte) dengan jeda
+    // lebih panjang, supaya printer sempat benar-benar mencetak tiap baris
+    // sebelum data berikutnya datang. Kalau ini yang dikirim cepat kayak
+    // teks, printer murah gampang "tersendat"/putus-putus karena buffernya
+    // kebanjiran. Teks (jauh lebih ringan buat printer) tetap dikirim cepat.
+    await writeInChunks(characteristic, buildEscPosLogoBlock(), 48, 40);
+    await writeInChunks(characteristic, buildEscPosTextBlock(state.lastSale), 100, 15);
     showAlert('Struk terkirim ke printer Bluetooth.');
   } catch(err){
     showInfoPopup('Gagal mencetak lewat Bluetooth: ' + (err && err.message ? err.message : err) + '. Pastikan printer menyala, dalam jangkauan, dan sudah di-pairing di pengaturan Bluetooth HP. Kalau tetap gagal/putus-putus, coba tombol "Cetak lewat Sistem" + aplikasi RawBT.', 'Cetak Gagal');
@@ -1853,7 +1863,6 @@ function viewPengaturan(){
       }
     </div>
    
-
     <div class="section-title">Cadangkan &amp; Pulihkan Data</div>
     <div class="card">
       <div class="muted" style="margin-bottom:14px; font-size:12.5px;">
