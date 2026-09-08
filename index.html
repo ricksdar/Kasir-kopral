@@ -838,10 +838,7 @@ function viewLogin(){
         <button class="user-btn" onclick="selectLoginUser(${u.id})">
           <span class="avatar">${u.name.charAt(0).toUpperCase()}</span> ${escapeHtml(u.name)}
         </button>`).join('')}
-      <div class="muted" style="text-align:center; margin-top:22px; font-size:12px;">
-        Akun pertama kali: <strong>Admin</strong> · PIN <strong>0000</strong><br>PIN bisa diganti di menu Kasir Toko.
-      </div>
-    </div>
+         </div>
     ${state.modal ? modalView() : ''}
   `;
 }
@@ -1216,6 +1213,7 @@ function viewReceipt(){
     <button class="btn btn-dark" onclick="printViaBluetooth()">${ICONS.bluetooth} Cetak via Bluetooth</button>
     <button class="btn btn-dark" style="margin-top:10px;" onclick="printViaUSB()">${ICONS.usb} Cetak via USB</button>
     <button class="btn btn-outline" style="margin-top:10px;" onclick="printViaSystem()">${ICONS.printer} Cetak lewat Sistem (WiFi/lainnya)</button>
+    <button class="btn btn-outline" style="margin-top:10px;" onclick="printViaThermerWeb()">${ICONS.printer} Cetak via Thermer (khusus iPhone)</button>
 
     <button class="btn btn-gold" style="margin-top:16px;" onclick="setScreen('pos')">Transaksi Baru</button>
   `;
@@ -1613,6 +1611,17 @@ async function printViaSystem(){
   w.document.close();
   w.focus();
   setTimeout(()=>{ w.print(); }, 250);
+}
+// Cetak via app Thermer khusus iPhone -- Web Bluetooth (dipakai printViaBluetooth
+// di atas) tidak didukung Safari/WebKit sama sekali, jadi ini jalan lain: buka
+// app Thermer lewat URL scheme bprint://, dia yang fetch data struk dari
+// Supabase Edge Function 'receipt-print' (bukan dari browser ini) lalu cetak.
+// Perlu "Browser Print" aktif di Settings Thermer dan printer sudah pernah
+// di-pairing di app itu sendiri.
+function printViaThermerWeb(){
+  if(!state.lastSale){ showAlert('Belum ada transaksi untuk dicetak.'); return; }
+  const endpoint = 'https://mcdxhjbidoxcpnekzdtf.supabase.co/functions/v1/receipt-print?id=' + state.lastSale.id;
+  window.location.href = 'bprint://' + endpoint;
 }
 
 /* ============ RIWAYAT ============ */
