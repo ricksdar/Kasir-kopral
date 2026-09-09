@@ -526,7 +526,7 @@ function persistSession(){ saveJSON('kk_session', session); }
 // pola akses yang sudah ada di app ini (PIN 4 digit tetap jadi pengaman
 // sesungguhnya lewat RPC kk_verify_staff_pin).
 function isAdmin(){ return !!(session && session.name === 'Admin'); }
-const ADMIN_ONLY_SCREENS = ['riwayat', 'pengaturan'];
+const ADMIN_ONLY_SCREENS = ['riwayat', 'pelanggan', 'pengaturan'];
 
 /* ===== Notifikasi pesanan online (suara + browser notification) =====
    Cuma aktif buat sesi Admin, karena cuma Admin yang bisa buka Riwayat
@@ -777,6 +777,8 @@ let state = {
   historyKasir: 'Semua',
   historyExpanded: {},
   stockSearch: '',
+  customerSearch: '',
+  customerDetailPhone: null,
   modal: null, // {type:'editProduct'|'newProduct'|'editUser'|'newUser'|'manualItem'|'confirm', data:{}}
   toast: null,
 };
@@ -826,6 +828,7 @@ const ICONS = {
   history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l4 2"/></svg>',
   stock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 7 12 3 4 7v10l8 4 8-4V7Z"/><path d="M4 7l8 4 8-4M12 11v10"/></svg>',
   users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 19c0-3.3 2.9-5.5 6.5-5.5s6.5 2.2 6.5 5.5"/><circle cx="17" cy="8" r="2.6"/><path d="M16 13.6c2.6.4 4.5 2.3 4.5 5.4"/></svg>',
+  contact: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c0-4.1 3.4-7 7.5-7s7.5 2.9 7.5 7"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>',
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M15 18l-6-6 6-6"/></svg>',
@@ -873,6 +876,7 @@ function render(){
   else if(state.screen === 'cart') body = viewCart();
   else if(state.screen === 'receipt') body = viewReceipt();
   else if(state.screen === 'riwayat') body = viewRiwayat();
+  else if(state.screen === 'pelanggan') body = viewPelanggan();
   else if(state.screen === 'stok') body = viewStok();
   else if(state.screen === 'pengaturan') body = viewPengaturan();
 
@@ -939,6 +943,7 @@ function bottomNav(){
   const allTabs = [
     {id:'pos', label:'Kasir', icon:ICONS.pos},
     {id:'riwayat', label:'Riwayat', icon:ICONS.history},
+    {id:'pelanggan', label:'Pelanggan', icon:ICONS.contact},
     {id:'stok', label:'Stok', icon:ICONS.stock},
     {id:'pengaturan', label:'Kasir Toko', icon:ICONS.users},
   ];
@@ -1015,20 +1020,55 @@ async function verifyPinAndLogin(pin){
   }
   render(); // tampilin 4 titik terisi dulu selagi nunggu respon server
   try{
-    const { data, error } = await sb.rpc('kk_verify_staff_pin', { p_id: u.id, p_pin: pin });
-    if(error) throw error;
-    if(data === true){
-      session = {id: u.id, name: u.name};
-      persistSession();
-      state.screen = 'pos';
-      unlockAudio();
-      if(isAdmin()){ requestNotifPermission(); requestWakeLock(); }
-      render();
-    } else {
-      state.pinError = 'PIN salah, coba lagi';
-      render();
-      setTimeout(()=>{ state.pinBuffer=''; render(); }, 450);
+    // Lewat Edge Function staff-login: PIN diverifikasi lewat RPC yang sama
+    // seperti sebelumnya (kk_verify_staff_pin), TAPI sekaligus menghasilkan
+    // sesi Supabase Auth sungguhan -- supaya request berikutnya dikenali
+    // server sebagai `authenticated`, bukan `anon` yang sama dipakai website
+    // publik. Kalau Edge Function ini gagal dipanggil sama sekali (bukan
+    // salah PIN, tapi mis. jaringan/fungsi bermasalah), fallback ke jalur
+    // lama (PIN-only, tanpa sesi Auth) supaya kasir tidak sampai terkunci.
+    let loggedInWithRealSession = false;
+    try{
+      const res = await fetch('https://mcdxhjbidoxcpnekzdtf.supabase.co/functions/v1/staff-login', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ staffId: u.id, pin }),
+      });
+      if(res.status === 401){
+        state.pinError = 'PIN salah, coba lagi';
+        render();
+        setTimeout(()=>{ state.pinBuffer=''; render(); }, 450);
+        return;
+      }
+      const result = await res.json();
+      if(res.ok && result.access_token){
+        const { error: setSessErr } = await sb.auth.setSession({
+          access_token: result.access_token, refresh_token: result.refresh_token,
+        });
+        if(setSessErr) throw setSessErr;
+        loggedInWithRealSession = true;
+      }
+    }catch(edgeErr){
+      console.warn('staff-login Edge Function gagal, fallback ke verifikasi PIN biasa:', edgeErr);
     }
+
+    if(!loggedInWithRealSession){
+      const { data, error } = await sb.rpc('kk_verify_staff_pin', { p_id: u.id, p_pin: pin });
+      if(error) throw error;
+      if(data !== true){
+        state.pinError = 'PIN salah, coba lagi';
+        render();
+        setTimeout(()=>{ state.pinBuffer=''; render(); }, 450);
+        return;
+      }
+    }
+
+    session = {id: u.id, name: u.name};
+    persistSession();
+    state.screen = 'pos';
+    unlockAudio();
+    if(isAdmin()){ requestNotifPermission(); requestWakeLock(); }
+    render();
   }catch(e){
     console.warn('Gagal verifikasi PIN:', e);
     state.pinError = 'Gagal verifikasi PIN, cek koneksi internet.';
@@ -1040,6 +1080,7 @@ function pinBackspace(){ state.pinBuffer = state.pinBuffer.slice(0,-1); render()
 function doLogout(){
   releaseWakeLock();
   session = null; persistSession();
+  if(sb) sb.auth.signOut().catch(()=>{}); // tutup sesi Auth sungguhan juga kalau ada (staff-login)
   state.cart = []; state.discount = 0; state.cash = '';
   state.screen = 'login';
   render();
@@ -1226,31 +1267,92 @@ async function finishSale(){
   if(method === 'cash' && cash < total){ showAlert('Uang diterima masih kurang dari total. Lengkapi dulu sebelum menyelesaikan transaksi.'); return; }
   state.processingSale = true;
   const cartSnapshot = state.cart;
-  const sale = {
-    id: nextId(sales),
-    datetime: new Date().toISOString(),
-    kasir: session.name,
-    items: cartSnapshot.map(c=>{ const price = cartItemUnitPrice(c); return {productId:c.productId, name:c.name, price, qty:c.qty, subtotal:price*c.qty}; }),
-    discount: Number(state.discount)||0,
-    subtotal, total, cash, change: cash-total,
-    paymentMethod: method,
-    channel: 'store',
-  };
-  sales.unshift(sale);
-  persistSales();
-  // Kurangi stok. Kalau sync aktif, pakai fungsi database ATOMIK supaya
-  // hasilnya tetap benar walau ada kasir lain checkout produk yang sama
-  // di detik yang bersamaan (server yang menentukan urutan, bukan HP).
-  for(const c of cartSnapshot){
-    if(!c.productId) continue;
-    const p = products.find(x=>x.id===c.productId);
-    if(!p) continue;
-    let newStock = null;
-    if(SYNC_ENABLED) newStock = await syncDecrementStock(c.productId, c.qty);
-    if(newStock === null) newStock = Math.max(0, p.stock - c.qty); // fallback: offline / gagal sync
-    p.stock = newStock;
+  let sale;
+  let needsPush = false; // true kalau sale ini belum berhasil masuk server lewat RPC, harus di-push manual
+
+  if(SYNC_ENABLED && sb){
+    // Jalur online: satu panggilan RPC (kk_record_store_sale) yang atomik di
+    // server -- harga item katalog dihitung ulang di server (ecer/grosir
+    // sesuai qty), stok dikurangi di baris yang sama, dan kalau ada item yang
+    // stoknya kurang, SEMUA perubahan (termasuk item lain yang sudah lolos
+    // duluan) otomatis dibatalkan oleh database. Item manual (di luar stok)
+    // tetap pakai harga yang diisi kasir seperti biasa.
+    try{
+      const { data, error } = await sb.rpc('kk_record_store_sale', {
+        p_kasir_name: session.name,
+        p_items: cartSnapshot.map(c => c.productId
+          ? { productId: c.productId, qty: c.qty }
+          : { productId: null, name: c.name, qty: c.qty, price: c.price || 0 }),
+        p_discount: Number(state.discount)||0,
+        p_payment_method: method,
+        p_cash: cash,
+      });
+      if(error) throw error;
+      sale = data;
+      cartSnapshot.forEach(c => {
+        if(!c.productId) return;
+        const p = products.find(x=>x.id===c.productId);
+        if(p) p.stock = Math.max(0, p.stock - c.qty);
+      });
+      saveJSON('kk_products', products);
+    }catch(e){
+      // Jangan sampai transaksi gagal total cuma karena internet sempat
+      // putus sedetik -- catat lokal dulu (seperti mode offline), nanti
+      // "Paksa Kirim ke Cloud" di menu Pengaturan akan menyusulkan ke server.
+      // Stok TETAP dikurangi lokal supaya tidak oversell di HP ini sendiri;
+      // begitu tersambung lagi, alur sync biasa yang menyamakan datanya.
+      console.warn('RPC kk_record_store_sale gagal, fallback ke catatan lokal:', e);
+      sale = {
+        id: nextId(sales),
+        datetime: new Date().toISOString(),
+        kasir: session.name,
+        items: cartSnapshot.map(c=>{ const price = cartItemUnitPrice(c); return {productId:c.productId, name:c.name, price, qty:c.qty, subtotal:price*c.qty}; }),
+        discount: Number(state.discount)||0,
+        subtotal, total, cash, change: cash-total,
+        paymentMethod: method,
+        channel: 'store',
+      };
+      cartSnapshot.forEach(c => {
+        if(!c.productId) return;
+        const p = products.find(x=>x.id===c.productId);
+        if(p) p.stock = Math.max(0, p.stock - c.qty);
+      });
+      saveJSON('kk_products', products);
+      needsPush = true;
+      showToastMsg('Transaksi tersimpan di HP ini, belum sinkron ke server (cek koneksi).');
+    }
+  } else {
+    // Jalur offline (SYNC_ENABLED mati / tidak ada koneksi Supabase): tetap
+    // catat lokal dulu seperti sebelumnya, nanti nyusul ke server saat sync
+    // berikutnya jalan (lihat syncUpsertRows / persistSales di tempat lain).
+    sale = {
+      id: nextId(sales),
+      datetime: new Date().toISOString(),
+      kasir: session.name,
+      items: cartSnapshot.map(c=>{ const price = cartItemUnitPrice(c); return {productId:c.productId, name:c.name, price, qty:c.qty, subtotal:price*c.qty}; }),
+      discount: Number(state.discount)||0,
+      subtotal, total, cash, change: cash-total,
+      paymentMethod: method,
+      channel: 'store',
+    };
+    cartSnapshot.forEach(c => {
+      if(!c.productId) return;
+      const p = products.find(x=>x.id===c.productId);
+      if(p) p.stock = Math.max(0, p.stock - c.qty);
+    });
+    saveJSON('kk_products', products);
+    needsPush = true;
   }
-  saveJSON('kk_products', products); // stok sudah pasti benar (dari server kalau online); tinggal simpan lokal, tanpa upsert ulang berlebihan
+
+  sales.unshift(sale);
+  saveJSON('kk_sales', sales);
+  if(needsPush && SYNC_ENABLED && sb){
+    // Coba langsung push sekali (kalau memang sekadar putus sedetik, biasanya
+    // langsung berhasil). Kalau tetap gagal, sale ini masih ada di
+    // localStorage dan akan ikut terangkut lewat "Paksa Kirim ke Cloud" di
+    // menu Pengaturan, atau retry otomatis berikutnya.
+    syncUpsertRows(SALES_TABLE, [saleToRow(sale)]);
+  }
   state.processingSale = false;
   state.lastSale = sale;
   state.cart = []; state.discount = 0; state.cash = ''; state.paymentMethod = 'cash';
@@ -1926,11 +2028,22 @@ function expenseCardHtml(e){
 }
 function toggleSale(id){ state.historyExpanded[id] = !state.historyExpanded[id]; render(); }
 
-function confirmOnlineOrderPaid(id){
+async function confirmOnlineOrderPaid(id){
   const s = sales.find(x=>x.id===id);
   if(!s) return;
-  s.orderStatus = 'Dibayar';
-  persistSales();
+  if(SYNC_ENABLED && sb){
+    try{
+      const { data, error } = await sb.rpc('kk_set_online_order_status', { p_id: id, p_status: 'Dibayar' });
+      if(error) throw error;
+      s.orderStatus = data.orderStatus;
+    }catch(e){
+      showInfoPopup('Gagal menandai pesanan #' + id + ' sebagai dibayar: ' + (e && e.message ? e.message : e), 'Gagal');
+      return;
+    }
+  } else {
+    s.orderStatus = 'Dibayar';
+  }
+  saveJSON('kk_sales', sales);
   showAlert('Pesanan #' + id + ' ditandai sudah dibayar.');
   render();
 }
@@ -1938,20 +2051,118 @@ function cancelOnlineOrder(id){
   const s = sales.find(x=>x.id===id);
   if(!s) return;
   askConfirm('Batalkan pesanan #' + id + ' (' + rp(s.total) + ') dan kembalikan stoknya? Aksi ini tidak bisa diurungkan.', async function(){
-    for(const it of s.items){
-      const p = products.find(x=>x.id===it.productId);
-      if(!p) continue; // produk sudah dihapus dari katalog, stoknya tidak bisa dikembalikan otomatis
-      let newStock = null;
-      if(SYNC_ENABLED) newStock = await syncDecrementStock(it.productId, -it.qty); // qty negatif = tambah balik
-      if(newStock === null) newStock = p.stock + it.qty; // fallback kalau offline/gagal sync
-      p.stock = newStock;
+    if(SYNC_ENABLED && sb){
+      // kk_set_online_order_status mengembalikan stok di transaksi database
+      // yang sama -- jadi tidak perlu lagi loop kk_decrement_stock manual
+      // per item seperti sebelumnya.
+      try{
+        const { data, error } = await sb.rpc('kk_set_online_order_status', { p_id: id, p_status: 'Dibatalkan' });
+        if(error) throw error;
+        s.orderStatus = data.orderStatus;
+        for(const it of s.items){
+          const p = products.find(x=>x.id===it.productId);
+          if(p) p.stock += it.qty; // samakan tampilan lokal dengan stok yang baru dikembalikan di server
+        }
+        saveJSON('kk_products', products);
+      }catch(e){
+        showInfoPopup('Gagal membatalkan pesanan #' + id + ': ' + (e && e.message ? e.message : e), 'Gagal');
+        return;
+      }
+    } else {
+      for(const it of s.items){
+        const p = products.find(x=>x.id===it.productId);
+        if(p) p.stock += it.qty;
+      }
+      saveJSON('kk_products', products);
+      s.orderStatus = 'Dibatalkan';
     }
-    saveJSON('kk_products', products);
-    s.orderStatus = 'Dibatalkan';
-    persistSales();
+    saveJSON('kk_sales', sales);
     showAlert('Pesanan #' + id + ' dibatalkan, stok sudah dikembalikan.');
     render();
   });
+}
+
+/* ============ PELANGGAN (dibangun dari riwayat pesanan online) ============ */
+function buildCustomerDirectory(){
+  const map = {};
+  sales.filter(s => s.channel === 'online' && s.customerPhone).forEach(s => {
+    const key = s.customerPhone.replace(/\D/g,'');
+    if(!key) return;
+    if(!map[key]) map[key] = { phone: s.customerPhone, name: s.customerName, orders: [], totalPaid: 0, lastOrder: s.datetime };
+    map[key].orders.push(s);
+    if(new Date(s.datetime) > new Date(map[key].lastOrder)){
+      map[key].lastOrder = s.datetime;
+      map[key].name = s.customerName; // pakai nama dari order paling baru
+    }
+    if(s.orderStatus === 'Dibayar') map[key].totalPaid += (s.total||0);
+  });
+  return Object.values(map).sort((a,b)=> new Date(b.lastOrder) - new Date(a.lastOrder));
+}
+function waLink(phone){
+  let n = String(phone).replace(/\D/g,'');
+  if(n.startsWith('0')) n = '62' + n.slice(1);
+  else if(!n.startsWith('62')) n = '62' + n;
+  return 'https://wa.me/' + n;
+}
+function viewPelanggan(){
+  const all = buildCustomerDirectory();
+
+  if(state.customerDetailPhone){
+    const cust = all.find(c => c.phone.replace(/\D/g,'') === state.customerDetailPhone);
+    if(!cust){ state.customerDetailPhone = null; return viewPelanggan(); }
+    const sortedOrders = [...cust.orders].sort((a,b)=> new Date(b.datetime) - new Date(a.datetime));
+    return `
+      <button class="icon-btn" style="background:var(--cream); color:var(--ink); margin-bottom:14px;" onclick="state.customerDetailPhone=null; render();">${ICONS.back}</button>
+      <div class="card" style="padding:16px; margin-bottom:14px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <span class="avatar">${escapeHtml(cust.name||'?').charAt(0).toUpperCase()}</span>
+          <div style="flex:1;">
+            <div class="sname" style="font-size:16px;">${escapeHtml(cust.name||'(tanpa nama)')}</div>
+            <div class="smeta">${escapeHtml(cust.phone)}</div>
+          </div>
+          <a class="btn btn-dark" style="padding:8px 14px; font-size:13px; text-decoration:none;" href="${waLink(cust.phone)}" target="_blank" rel="noopener">Chat WA</a>
+        </div>
+        <div style="display:flex; gap:24px; margin-top:14px;">
+          <div><div class="smeta">Total belanja (dibayar)</div><div class="sname">${rp(cust.totalPaid)}</div></div>
+          <div><div class="smeta">Jumlah order</div><div class="sname">${cust.orders.length}</div></div>
+        </div>
+      </div>
+      <div class="card">
+        ${sortedOrders.map(s => `
+          <div class="stock-row">
+            <div style="flex:1;">
+              <div class="sname">#${s.id} · ${rp(s.total)}</div>
+              <div class="smeta">${new Date(s.datetime).toLocaleString('id-ID')} · ${escapeHtml(s.orderStatus||'-')}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+    `;
+  }
+
+  const q = state.customerSearch.trim().toLowerCase();
+  const list = q ? all.filter(c => (c.name||'').toLowerCase().includes(q) || c.phone.includes(q)) : all;
+  return `
+    <div class="search-wrap">
+      ${ICONS.search}
+      <input id="customer-search" placeholder="Cari nama atau nomor HP..." value="${escapeAttr(state.customerSearch)}" oninput="state.customerSearch=this.value; render();">
+    </div>
+    <div class="muted" style="margin:-2px 0 10px; font-size:12px;">${all.length} pelanggan tercatat dari pesanan online. Transaksi walk-in di toko belum mencatat nomor HP.</div>
+    <div class="card">
+      ${list.length===0 ? `<div class="empty">Belum ada pelanggan yang cocok.</div>` :
+        list.map(c => `
+        <div class="stock-row" style="cursor:pointer;" onclick="state.customerDetailPhone='${c.phone.replace(/\D/g,'')}'; render();">
+          <span class="avatar">${escapeHtml(c.name||'?').charAt(0).toUpperCase()}</span>
+          <div style="flex:1;">
+            <div class="sname">${escapeHtml(c.name||'(tanpa nama)')}</div>
+            <div class="smeta">${escapeHtml(c.phone)} · ${c.orders.length} order</div>
+          </div>
+          <div class="sright">
+            <div class="sprice">${rp(c.totalPaid)}</div>
+          </div>
+        </div>`).join('')
+      }
+    </div>
+  `;
 }
 
 /* ============ STOK ============ */
@@ -2254,22 +2465,43 @@ function modalExpenseForm(type){
     <button class="btn btn-outline" style="margin-top:10px;" onclick="closeModal()">Batal</button>
   `;
 }
-function saveExpense(){
+async function saveExpense(){
   const desc = document.getElementById('ex-desc').value.trim();
   const amount = Number(document.getElementById('ex-amount').value.replace(/[^0-9]/g,'')) || 0;
   const type = document.getElementById('ex-type').value === 'in' ? 'in' : 'out';
   if(!desc){ showAlert('Keterangan wajib diisi'); return; }
   if(amount<=0){ showAlert('Nominal harus lebih dari Rp0'); return; }
-  expenses.unshift({ id: nextId(expenses), datetime: new Date().toISOString(), kasir: session.name, description: desc, amount, type });
-  persistExpenses();
+
+  let entry;
+  if(SYNC_ENABLED && sb){
+    try{
+      const { data, error } = await sb.rpc('kk_record_expense', {
+        p_kasir_name: session.name, p_description: desc, p_amount: amount, p_type: type,
+      });
+      if(error) throw error;
+      entry = data;
+    }catch(e){
+      showInfoPopup('Gagal mencatat ke server: ' + (e && e.message ? e.message : e) + '\n\nDicatat lokal dulu, akan disusulkan lewat "Paksa Kirim ke Cloud".', 'Sinkronisasi Gagal');
+      entry = { id: nextId(expenses), datetime: new Date().toISOString(), kasir: session.name, description: desc, amount, type };
+      syncUpsertRows(EXPENSES_TABLE, [expenseToRow(entry)]);
+    }
+  } else {
+    entry = { id: nextId(expenses), datetime: new Date().toISOString(), kasir: session.name, description: desc, amount, type };
+  }
+  expenses.unshift(entry);
+  saveJSON('kk_expenses', expenses);
   closeModal();
   showAlert(type==='in' ? 'Kas masuk dicatat.' : 'Pengeluaran dicatat.');
 }
 function deleteExpense(id){
-  askConfirm('Hapus catatan pengeluaran ini?', function(){
+  askConfirm('Hapus catatan pengeluaran ini?', async function(){
     expenses = expenses.filter(x=>x.id!==id);
-    persistExpenses();
-    if(SYNC_ENABLED) syncDeleteRow(EXPENSES_TABLE, id);
+    saveJSON('kk_expenses', expenses);
+    if(SYNC_ENABLED && sb){
+      try{ await sb.rpc('kk_delete_expense', { p_id: id }); }
+      catch(e){ showInfoPopup('Terhapus di HP ini, tapi gagal sinkron ke server: ' + (e && e.message ? e.message : e), 'Sinkronisasi Gagal'); }
+    }
+    render();
   });
 }
 
@@ -2574,15 +2806,32 @@ async function saveProduct(id){
     const p = products.find(x=>x.id===id);
     p.name=name; p.category=category; p.priceEcer=priceEcer; p.priceGrosir=priceGrosir; p.stock=stock; p.imageUrl=imageUrl;
   }
-  persistProducts();
+  saveJSON('kk_products', products); // simpan lokal dulu (offline-first)
+  // Sinkron lewat RPC kk_upsert_product (tervalidasi di server), bukan lagi
+  // upsert bebas ke seluruh tabel kk_products lewat persistProducts().
+  if(SYNC_ENABLED && sb){
+    try{
+      await sb.rpc('kk_upsert_product', {
+        p_id: targetId, p_name: name, p_category: category,
+        p_price_ecer: priceEcer, p_price_grosir: priceGrosir,
+        p_stock: stock, p_image_url: imageUrl,
+      });
+    }catch(e){
+      showInfoPopup('Produk tersimpan di HP ini, tapi gagal sinkron ke server: ' + (e && e.message ? e.message : e) + '\n\nCoba lagi saat koneksi stabil (buka lagi produk ini dan Simpan ulang).', 'Sinkronisasi Gagal');
+    }
+  }
   resetPendingPhoto();
   closeModal();
 }
 function deleteProduct(id){
-  askConfirm('Hapus produk ini dari katalog?', function(){
+  askConfirm('Hapus produk ini dari katalog?', async function(){
     products = products.filter(p=>p.id!==id);
-    persistProducts();
-    if(SYNC_ENABLED) syncDeleteRow(PRODUCTS_TABLE, id);
+    saveJSON('kk_products', products);
+    if(SYNC_ENABLED && sb){
+      try{ await sb.rpc('kk_delete_product', { p_id: id }); }
+      catch(e){ showInfoPopup('Produk terhapus di HP ini, tapi gagal sinkron ke server: ' + (e && e.message ? e.message : e), 'Sinkronisasi Gagal'); }
+    }
+    render();
   });
 }
 
