@@ -225,6 +225,22 @@ Minimum version required to store current data is: `+i+`.
     background:var(--ink); color:#fff; padding:12px 18px; border-radius:12px; font-size:13.5px; font-weight:700;
     box-shadow:var(--shadow); max-width:86%; text-align:center;
   }
+  .order-banner{
+    position:sticky; top:0; z-index:70; display:flex; align-items:center; gap:10px;
+    background:linear-gradient(90deg, #16a34a, #22c55e); color:#fff; padding:11px 14px;
+    font-size:13.5px; font-weight:700; box-shadow:0 2px 8px rgba(0,0,0,.15);
+    animation: kk-banner-pulse 1.4s ease-in-out infinite;
+  }
+  .order-banner .ob-text{ flex:1; }
+  .order-banner button{
+    border:none; border-radius:8px; padding:7px 12px; font-size:12.5px; font-weight:800; cursor:pointer;
+  }
+  .order-banner .ob-view{ background:#fff; color:#16a34a; }
+  .order-banner .ob-dismiss{ background:rgba(255,255,255,.2); color:#fff; }
+  @keyframes kk-banner-pulse{
+    0%,100%{ box-shadow:0 2px 8px rgba(0,0,0,.15); }
+    50%{ box-shadow:0 2px 16px rgba(34,197,94,.65); }
+  }
 </style>
 </head>
 <body>
@@ -444,6 +460,11 @@ function subscribeRealtime(){
         sales.unshift(local);
         sales.sort((a,b) => new Date(b.datetime) - new Date(a.datetime));
         saveJSON('kk_sales', sales);
+        if(local.channel === 'online' && isAdmin()){
+          unseenOnlineOrders.push(local);
+          playOrderSound();
+          showOrderBrowserNotif(local);
+        }
         render();
       }
     })
@@ -499,6 +520,83 @@ function persistProducts(){ saveJSON('kk_products', products); syncUpsertRows(PR
 function persistSales(){ saveJSON('kk_sales', sales); syncUpsertRows(SALES_TABLE, sales.map(saleToRow)); }
 function persistExpenses(){ saveJSON('kk_expenses', expenses); syncUpsertRows(EXPENSES_TABLE, expenses.map(expenseToRow)); }
 function persistSession(){ saveJSON('kk_session', session); }
+// Menu Riwayat Penjualan & Kasir Toko (kelola kasir) dikunci khusus akun
+// bernama persis 'Admin' (akun default id 1). Ini pengecekan sisi klien
+// (menyembunyikan menu), bukan pengaman data di server -- konsisten dengan
+// pola akses yang sudah ada di app ini (PIN 4 digit tetap jadi pengaman
+// sesungguhnya lewat RPC kk_verify_staff_pin).
+function isAdmin(){ return !!(session && session.name === 'Admin'); }
+const ADMIN_ONLY_SCREENS = ['riwayat', 'pengaturan'];
+
+/* ===== Notifikasi pesanan online (suara + browser notification) =====
+   Cuma aktif buat sesi Admin, karena cuma Admin yang bisa buka Riwayat
+   buat proses pesanan online-nya. */
+let unseenOnlineOrders = [];
+let audioCtx = null;
+function unlockAudio(){
+  if(!audioCtx){
+    try{ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ return; }
+  }
+  if(audioCtx && audioCtx.state === 'suspended'){ audioCtx.resume().catch(()=>{}); }
+}
+document.addEventListener('click', unlockAudio, { once: true });
+
+function playOrderSound(){
+  unlockAudio();
+  if(!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  [ {t:0, f:880}, {t:0.16, f:1175}, {t:0.42, f:880}, {t:0.58, f:1175} ].forEach(n=>{
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = n.f;
+    gain.gain.setValueAtTime(0.0001, t0+n.t);
+    gain.gain.exponentialRampToValueAtTime(0.32, t0+n.t+0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0+n.t+0.15);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0+n.t); osc.stop(t0+n.t+0.16);
+  });
+}
+function requestNotifPermission(){
+  if(!('Notification' in window)) return;
+  if(Notification.permission === 'default') Notification.requestPermission().catch(()=>{});
+}
+function showOrderBrowserNotif(sale){
+  if(!('Notification' in window) || Notification.permission !== 'granted') return;
+  try{
+    const n = new Notification('🔔 Pesanan Online Baru', {
+      body: (sale.customerName ? sale.customerName + ' — ' : '') + rp(sale.total),
+      tag: 'kk-online-order-' + sale.id,
+    });
+    n.onclick = () => { window.focus(); setScreen('riwayat'); n.close(); };
+  }catch(e){}
+}
+function dismissOrderBanner(){ unseenOnlineOrders = []; render(); }
+function openNewOrderFromBanner(){ unseenOnlineOrders = []; setScreen('riwayat'); }
+
+/* ===== Wake Lock: layar gak gampang mati pas Admin lagi jaga, biar notif
+   pesanan online gak ketunda gara-gara HP terkunci. Cuma aktif buat Admin. */
+let wakeLock = null;
+async function requestWakeLock(){
+  if(!('wakeLock' in navigator) || !isAdmin()) return;
+  try{
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  }catch(e){
+    console.warn('Wake Lock gagal (biasanya karena tab gak aktif/baterai rendah):', e);
+  }
+}
+function releaseWakeLock(){
+  if(wakeLock){ wakeLock.release().catch(()=>{}); wakeLock = null; }
+}
+// Wake Lock otomatis lepas kalau tab disembunyikan (minimize/kunci layar) --
+// browser emang begitu by design. Begitu tab kelihatan lagi, minta ulang.
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && isAdmin() && !wakeLock){
+    requestWakeLock();
+  }
+});
+
 function persistCategoryOrder(){ saveJSON('kk_category_order', categoryOrder); syncPush('category_order', categoryOrder); }
 async function refreshStaffNames(){
   if(!sb) return;
@@ -705,7 +803,17 @@ function confirmNo(){
   closeModal();
 }
 
-function setScreen(s){ state.screen = s; state.modal = null; render(); window.scrollTo(0,0); }
+function setScreen(s){
+  if(ADMIN_ONLY_SCREENS.includes(s) && !isAdmin()){
+    state.toast = 'Menu ini khusus akun Admin.';
+    setTimeout(()=>{ state.toast=null; render(); }, 1800);
+    render();
+    return;
+  }
+  state.screen = s; state.modal = null;
+  if(s === 'riwayat') unseenOnlineOrders = [];
+  render(); window.scrollTo(0,0);
+}
 function openModal(type, data){
   if(type==='newProduct' || type==='editProduct') resetPendingPhoto();
   state.modal = {type, data: data || {}}; render();
@@ -756,6 +864,10 @@ function render(){
     restoreFocus(); return;
   }
 
+  if(ADMIN_ONLY_SCREENS.includes(state.screen) && !isAdmin()){
+    state.screen = 'pos';
+  }
+
   let body = '';
   if(state.screen === 'pos') body = viewPOS();
   else if(state.screen === 'cart') body = viewCart();
@@ -766,6 +878,7 @@ function render(){
 
   app.innerHTML = `
     ${topbar()}
+    ${newOrderBanner()}
     <div class="content">${body}</div>
     ${state.screen==='pos' ? cartFab() : ''}
     ${bottomNav()}
@@ -807,13 +920,29 @@ function topbar(){
 function pendingOnlineOrders(){
   return sales.filter(s => s.channel==='online' && (s.orderStatus||'Menunggu Konfirmasi')==='Menunggu Konfirmasi');
 }
+function newOrderBanner(){
+  if(!isAdmin() || state.screen==='riwayat' || unseenOnlineOrders.length===0) return '';
+  const n = unseenOnlineOrders.length;
+  const last = unseenOnlineOrders[unseenOnlineOrders.length-1];
+  const text = n===1
+    ? `Pesanan online baru masuk${last && last.customerName ? ' dari '+escapeHtml(last.customerName) : ''}!`
+    : `${n} pesanan online baru masuk!`;
+  return `
+    <div class="order-banner">
+      <span class="ob-text">🔔 ${text}</span>
+      <button class="ob-view" onclick="openNewOrderFromBanner()">Lihat</button>
+      <button class="ob-dismiss" onclick="dismissOrderBanner()">Tutup</button>
+    </div>
+  `;
+}
 function bottomNav(){
-  const tabs = [
+  const allTabs = [
     {id:'pos', label:'Kasir', icon:ICONS.pos},
     {id:'riwayat', label:'Riwayat', icon:ICONS.history},
     {id:'stok', label:'Stok', icon:ICONS.stock},
     {id:'pengaturan', label:'Kasir Toko', icon:ICONS.users},
   ];
+  const tabs = isAdmin() ? allTabs : allTabs.filter(t => !ADMIN_ONLY_SCREENS.includes(t.id));
   const active = ['pos','cart','receipt'].includes(state.screen) ? 'pos' : state.screen;
   const pendingCount = pendingOnlineOrders().length;
   return `<div class="bottomnav">
@@ -838,7 +967,7 @@ function viewLogin(){
         <button class="user-btn" onclick="selectLoginUser(${u.id})">
           <span class="avatar">${u.name.charAt(0).toUpperCase()}</span> ${escapeHtml(u.name)}
         </button>`).join('')}
-         </div>
+    </div>
     ${state.modal ? modalView() : ''}
   `;
 }
@@ -892,6 +1021,8 @@ async function verifyPinAndLogin(pin){
       session = {id: u.id, name: u.name};
       persistSession();
       state.screen = 'pos';
+      unlockAudio();
+      if(isAdmin()){ requestNotifPermission(); requestWakeLock(); }
       render();
     } else {
       state.pinError = 'PIN salah, coba lagi';
@@ -907,6 +1038,7 @@ async function verifyPinAndLogin(pin){
 }
 function pinBackspace(){ state.pinBuffer = state.pinBuffer.slice(0,-1); render(); }
 function doLogout(){
+  releaseWakeLock();
   session = null; persistSession();
   state.cart = []; state.discount = 0; state.cash = '';
   state.screen = 'login';
@@ -1871,7 +2003,6 @@ function viewPengaturan(){
         </div>`).join('')
       }
     </div>
-   
     <div class="section-title">Cadangkan &amp; Pulihkan Data</div>
     <div class="card">
       <div class="muted" style="margin-bottom:14px; font-size:12.5px;">
@@ -2887,7 +3018,7 @@ function modalUserForm(u){
     <div class="field"><label>Nama Kasir</label><input id="uf-name" value="${u?escapeAttr(u.name):''}" placeholder="Nama kasir"></div>
     <div class="field"><label>PIN (4 digit angka)${isNew?'':' — kosongkan kalau gak mau ganti'}</label><input id="uf-pin" inputmode="numeric" maxlength="4" value="" placeholder="${isNew?'0000':'••••'}"></div>
     <button class="btn btn-primary" onclick="saveUser(${isNew?'null':u.id})">Simpan</button>
-    ${!isNew && users.length>1 ? `<button class="btn btn-danger" style="margin-top:10px;" onclick="deleteUser(${u.id})">${ICONS.trash} Hapus Kasir</button>` : ''}
+    ${!isNew && u.name!=='Admin' && users.length>1 ? `<button class="btn btn-danger" style="margin-top:10px;" onclick="deleteUser(${u.id})">${ICONS.trash} Hapus Kasir</button>` : ''}
     <button class="btn btn-outline" style="margin-top:10px;" onclick="closeModal()">Batal</button>
   `;
 }
@@ -2898,6 +3029,13 @@ async function saveUser(id){
   if(!name){ showAlert('Nama kasir wajib diisi'); return; }
   if(id===null && !/^\d{4}$/.test(pin)){ showAlert('PIN harus 4 digit angka'); return; }
   if(pin && !/^\d{4}$/.test(pin)){ showAlert('PIN harus 4 digit angka'); return; }
+  if(id!==null){
+    const target = users.find(u=>u.id===id);
+    if(target && target.name==='Admin' && name!=='Admin'){
+      showAlert('Akun "Admin" gak boleh diganti nama. Kalau namanya diubah, menu Riwayat & Kasir Toko bakal terkunci total (termasuk buat kamu sendiri) dan gak ada jalan buka lagi dari dalam app.');
+      return;
+    }
+  }
   try{
     if(id===null){
       const { data: newId, error } = await sb.rpc('kk_add_staff', { p_name: name, p_pin: pin });
@@ -2917,6 +3055,11 @@ async function saveUser(id){
 }
 function deleteUser(id){
   if(users.length<=1){ showAlert('Minimal harus ada 1 akun kasir.'); return; }
+  const target = users.find(u=>u.id===id);
+  if(target && target.name==='Admin'){
+    showAlert('Akun "Admin" gak boleh dihapus. Kalau terhapus, menu Riwayat & Kasir Toko bakal terkunci total dan gak ada jalan buka lagi dari dalam app.');
+    return;
+  }
   if(!sb){ showAlert('Gak ada koneksi ke server, coba lagi kalau internet sudah nyambung.'); return; }
   askConfirm('Hapus akun kasir ini?', async function(){
     const wasSelf = session && session.id===id;
@@ -2959,6 +3102,7 @@ window.onerror = function(message, source, lineno, colno, error){
 };
 try{
   render();
+  if(isAdmin()){ requestNotifPermission(); requestWakeLock(); }
   if(SYNC_ENABLED){ syncPull().then(subscribeRealtime); }
 }catch(err){
   showFatalError(err);
