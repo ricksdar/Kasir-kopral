@@ -1068,6 +1068,14 @@ async function verifyPinAndLogin(pin){
     state.screen = 'pos';
     unlockAudio();
     if(isAdmin()){ requestNotifPermission(); requestWakeLock(); }
+    if(loggedInWithRealSession){
+      // Data awal (syncPull) sempat jalan waktu app baru dibuka, SEBELUM
+      // login -- saat itu koneksi masih 'anon' dan RLS memblokir kk_sales/
+      // kk_expenses (sengaja, biar data pelanggan tidak bocor ke publik).
+      // Begitu benar-benar login (dapat sesi authenticated), tarik ulang
+      // supaya Riwayat & Pelanggan langsung terisi tanpa perlu refresh manual.
+      syncPull();
+    }
     render();
   }catch(e){
     console.warn('Gagal verifikasi PIN:', e);
